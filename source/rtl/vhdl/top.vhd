@@ -1,18 +1,8 @@
--------------------------------------------------------------------------------
---  Department of Computer Engineering and Communications
---  Author: LPRS2  <lprs2@rt-rk.com>
---
---  Module Name: top
---
---  Description:
---
---    Simple test for VGA control
---
--------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.std_logic_arith.all;
 use ieee.std_logic_unsigned.all;
+use ieee.numeric_std.all;
 
 entity top is
   generic (
@@ -23,7 +13,8 @@ entity top is
   port (
     clk_i          : in  std_logic;
     reset_n_i      : in  std_logic;
-    -- vga
+	 direct_mode_i       : in  std_logic; -- 0 - text and graphics interface mode, 1 - direct mode (direct force RGB component)
+    display_mode_i      : in  std_logic_vector(1 downto 0);  -- 00 - text mode, 01 - graphics mode, 01 - text & graphics    -- vga
     vga_hsync_o    : out std_logic;
     vga_vsync_o    : out std_logic;
     blank_o        : out std_logic;
@@ -130,11 +121,11 @@ architecture rtl of top is
   signal message_lenght      : std_logic_vector(MEM_ADDR_WIDTH-1 downto 0);
   signal graphics_lenght     : std_logic_vector(GRAPH_MEM_ADDR_WIDTH-1 downto 0);
   
-  signal direct_mode         : std_logic;
+  --signal direct_mode         : std_logic;
   --
   signal font_size           : std_logic_vector(3 downto 0);
   signal show_frame          : std_logic;
-  signal display_mode        : std_logic_vector(1 downto 0);  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+  --signal display_mode        : std_logic_vector(1 downto 0);  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
   signal foreground_color    : std_logic_vector(23 downto 0);
   signal background_color    : std_logic_vector(23 downto 0);
   signal frame_color         : std_logic_vector(23 downto 0);
@@ -142,6 +133,8 @@ architecture rtl of top is
   signal char_we             : std_logic;
   signal char_address        : std_logic_vector(MEM_ADDR_WIDTH-1 downto 0);
   signal char_value          : std_logic_vector(5 downto 0);
+  signal offset              : std_logic_vector(MEM_ADDR_WIDTH-1 downto 0);
+  signal offset_next         : std_logic_vector(MEM_ADDR_WIDTH-1 downto 0);
 
   signal pixel_address       : std_logic_vector(GRAPH_MEM_ADDR_WIDTH-1 downto 0);
   signal pixel_value         : std_logic_vector(GRAPH_MEM_DATA_WIDTH-1 downto 0);
@@ -156,110 +149,164 @@ architecture rtl of top is
   signal dir_blue            : std_logic_vector(7 downto 0);
   signal dir_pixel_column    : std_logic_vector(10 downto 0);
   signal dir_pixel_row       : std_logic_vector(10 downto 0);
-
+  
+  signal pixel_row           : std_logic_vector(GRAPH_MEM_ADDR_WIDTH-1 downto 0);
+  signal pixel_col           : std_logic_vector(GRAPH_MEM_ADDR_WIDTH-1 downto 0);
+  
+  signal sec_cnt             : std_logic_vector(24 downto 0);
+  signal sec_cnt_next        : std_logic_vector(24 downto 0);
+  signal move_cnt            : std_logic_vector(5 downto 0);
+  signal move_cnt_next       : std_logic_vector(5 downto 0);
 begin
 
-  -- calculate message lenght from font size
-  message_lenght <= conv_std_logic_vector(MEM_SIZE/64, MEM_ADDR_WIDTH)when (font_size = 3) else -- note: some resolution with font size (32, 64)  give non integer message lenght (like 480x640 on 64 pixel font size) 480/64= 7.5
-                    conv_std_logic_vector(MEM_SIZE/16, MEM_ADDR_WIDTH)when (font_size = 2) else
-                    conv_std_logic_vector(MEM_SIZE/4 , MEM_ADDR_WIDTH)when (font_size = 1) else
-                    conv_std_logic_vector(MEM_SIZE   , MEM_ADDR_WIDTH);
-  
-  graphics_lenght <= conv_std_logic_vector(MEM_SIZE*8*8, GRAPH_MEM_ADDR_WIDTH);
-  
-  -- removed to inputs pin
-  direct_mode <= '1';
-  display_mode     <= "10";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
-  
-  font_size        <= x"1";
-  show_frame       <= '1';
-  foreground_color <= x"FFFFFF";
-  background_color <= x"000000";
-  frame_color      <= x"FF0000";
+	-- calculate message lenght from font size
+	message_lenght <= conv_std_logic_vector(MEM_SIZE/64, MEM_ADDR_WIDTH)when (font_size = 3) else -- note: some resolution with font size (32, 64)  give non integer message lenght (like 480x640 on 64 pixel font size) 480/64= 7.5
+						  conv_std_logic_vector(MEM_SIZE/16, MEM_ADDR_WIDTH)when (font_size = 2) else
+						  conv_std_logic_vector(MEM_SIZE/4 , MEM_ADDR_WIDTH)when (font_size = 1) else
+						  conv_std_logic_vector(MEM_SIZE   , MEM_ADDR_WIDTH);
 
-  clk5m_inst : ODDR2
-  generic map(
-    DDR_ALIGNMENT => "NONE",  -- Sets output alignment to "NONE","C0", "C1" 
-    INIT => '0',              -- Sets initial state of the Q output to '0' or '1'
-    SRTYPE => "SYNC"          -- Specifies "SYNC" or "ASYNC" set/reset
-  )
-  port map (
-    Q  => pix_clock_o,       -- 1-bit output data
-    C0 => pix_clock_s,       -- 1-bit clock input
-    C1 => pix_clock_n,       -- 1-bit clock input
-    CE => '1',               -- 1-bit clock enable input
-    D0 => '1',               -- 1-bit data input (associated with C0)
-    D1 => '0',               -- 1-bit data input (associated with C1)
-    R  => '0',               -- 1-bit reset input
-    S  => '0'                -- 1-bit set input
-  );
-  pix_clock_n <= not(pix_clock_s);
+	graphics_lenght <= conv_std_logic_vector(MEM_SIZE*8*8, GRAPH_MEM_ADDR_WIDTH);
 
-  -- component instantiation
-  vga_top_i: vga_top
-  generic map(
-    RES_TYPE             => RES_TYPE,
-    H_RES                => H_RES,
-    V_RES                => V_RES,
-    MEM_ADDR_WIDTH       => MEM_ADDR_WIDTH,
-    GRAPH_MEM_ADDR_WIDTH => GRAPH_MEM_ADDR_WIDTH,
-    TEXT_MEM_DATA_WIDTH  => TEXT_MEM_DATA_WIDTH,
-    GRAPH_MEM_DATA_WIDTH => GRAPH_MEM_DATA_WIDTH,
-    MEM_SIZE             => MEM_SIZE
-  )
-  port map(
-    clk_i              => clk_i,
-    reset_n_i          => reset_n_i,
-    --
-    direct_mode_i      => direct_mode,
-    dir_red_i          => dir_red,
-    dir_green_i        => dir_green,
-    dir_blue_i         => dir_blue,
-    dir_pixel_column_o => dir_pixel_column,
-    dir_pixel_row_o    => dir_pixel_row,
-    -- cfg
-    display_mode_i     => display_mode,  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
-    -- text mode interface
-    text_addr_i        => char_address,
-    text_data_i        => char_value,
-    text_we_i          => char_we,
-    -- graphics mode interface
-    graph_addr_i       => pixel_address,
-    graph_data_i       => pixel_value,
-    graph_we_i         => pixel_we,
-    -- cfg
-    font_size_i        => font_size,
-    show_frame_i       => show_frame,
-    foreground_color_i => foreground_color,
-    background_color_i => background_color,
-    frame_color_i      => frame_color,
-    -- vga
-    vga_hsync_o        => vga_hsync_o,
-    vga_vsync_o        => vga_vsync_o,
-    blank_o            => blank_o,
-    pix_clock_o        => pix_clock_s,
-    vga_rst_n_o        => vga_rst_n_s,
-    psave_o            => psave_o,
-    sync_o             => sync_o,
-    red_o              => red_o,
-    green_o            => green_o,
-    blue_o             => blue_o     
-  );
-  
-  -- na osnovu signala iz vga_top modula dir_pixel_column i dir_pixel_row realizovati logiku koja genereise
-  --dir_red
-  --dir_green
-  --dir_blue
- 
-  -- koristeci signale realizovati logiku koja pise po TXT_MEM
-  --char_address
-  --char_value
-  --char_we
-  
-  -- koristeci signale realizovati logiku koja pise po GRAPH_MEM
-  --pixel_address
-  --pixel_value
-  --pixel_we
-  
-  
+	-- removed to inputs pin
+	--direct_mode <= '0';
+	--display_mode     <= "11";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+
+	font_size        <= x"1";
+	show_frame       <= '1';
+	foreground_color <= x"FFFFFF";
+	background_color <= x"000000";
+	frame_color      <= x"FF0000";
+
+	clk5m_inst : ODDR2
+	generic map(
+	 DDR_ALIGNMENT => "NONE",  -- Sets output alignment to "NONE","C0", "C1" 
+	 INIT => '0',              -- Sets initial state of the Q output to '0' or '1'
+	 SRTYPE => "SYNC"          -- Specifies "SYNC" or "ASYNC" set/reset
+	)
+	port map (
+	 Q  => pix_clock_o,       -- 1-bit output data
+	 C0 => pix_clock_s,       -- 1-bit clock input
+	 C1 => pix_clock_n,       -- 1-bit clock input
+	 CE => '1',               -- 1-bit clock enable input
+	 D0 => '1',               -- 1-bit data input (associated with C0)
+	 D1 => '0',               -- 1-bit data input (associated with C1)
+	 R  => '0',               -- 1-bit reset input
+	 S  => '0'                -- 1-bit set input
+	);
+	pix_clock_n <= not(pix_clock_s);
+
+	-- component instantiation
+	vga_top_i: vga_top
+	generic map(
+	 RES_TYPE             => RES_TYPE,
+	 H_RES                => H_RES,
+	 V_RES                => V_RES,
+	 MEM_ADDR_WIDTH       => MEM_ADDR_WIDTH,
+	 GRAPH_MEM_ADDR_WIDTH => GRAPH_MEM_ADDR_WIDTH,
+	 TEXT_MEM_DATA_WIDTH  => TEXT_MEM_DATA_WIDTH,
+	 GRAPH_MEM_DATA_WIDTH => GRAPH_MEM_DATA_WIDTH,
+	 MEM_SIZE             => MEM_SIZE
+	)
+	port map(
+	 clk_i              => clk_i,
+	 reset_n_i          => reset_n_i,
+	 --
+	 direct_mode_i      => direct_mode_i,
+	 dir_red_i          => dir_red,
+	 dir_green_i        => dir_green,
+	 dir_blue_i         => dir_blue,
+	 dir_pixel_column_o => dir_pixel_column,
+	 dir_pixel_row_o    => dir_pixel_row,
+	 -- cfg
+	 display_mode_i     => display_mode_i,  -- 01 - text mode,  - graphics mode, 11 - text & graphics
+	 -- text mode interface
+	 text_addr_i        => char_address,
+	 text_data_i        => char_value,
+	 text_we_i          => char_we,
+	 -- graphics mode interface
+	 graph_addr_i       => pixel_address,
+	 graph_data_i       => pixel_value,
+	 graph_we_i         => pixel_we,
+	 -- cfg
+	 font_size_i        => font_size,
+	 show_frame_i       => show_frame,
+	 foreground_color_i => foreground_color,
+	 background_color_i => background_color,
+	 frame_color_i      => frame_color,
+	 -- vga
+	 vga_hsync_o        => vga_hsync_o,
+	 vga_vsync_o        => vga_vsync_o,
+	 blank_o            => blank_o,
+	 pix_clock_o        => pix_clock_s,
+	 vga_rst_n_o        => vga_rst_n_s,
+	 psave_o            => psave_o,
+	 sync_o             => sync_o,
+	 red_o              => red_o,
+	 green_o            => green_o,
+	 blue_o             => blue_o     
+	);
+
+	 dir_red <= x"ff" when dir_pixel_column < 80 else
+				 x"ff" when dir_pixel_column < 160 else
+				 x"00" when dir_pixel_column < 240 else
+				 x"00" when dir_pixel_column < 320 else
+				 x"ff" when dir_pixel_column < 400 else
+				 x"ff" when dir_pixel_column < 480 else
+				 x"00" when dir_pixel_column < 560 else
+				 x"00";
+
+	dir_green <= x"ff" when dir_pixel_column < 80 else
+					x"ff" when dir_pixel_column < 160 else
+					x"ff" when dir_pixel_column < 240 else
+					x"ff" when dir_pixel_column < 320 else
+					x"00" when dir_pixel_column < 400 else
+					x"00" when dir_pixel_column < 480 else
+					x"00" when dir_pixel_column < 560 else
+					x"00";
+				 
+	dir_blue <= x"ff" when dir_pixel_column < 80 else
+				  x"00" when dir_pixel_column < 160 else
+				  x"ff" when dir_pixel_column < 240 else
+				  x"00" when dir_pixel_column < 320 else
+				  x"ff" when dir_pixel_column < 400 else
+				  x"00" when dir_pixel_column < 480 else
+				  x"ff" when dir_pixel_column < 560 else
+				  x"00";
+
+
+	char_we <= '1';
+
+
+	process (pix_clock_s) begin
+	 if (rising_edge(pix_clock_s)) then
+		if (char_address = "1001010111111") then
+		  char_address <= (others => '0');
+		else
+			char_address <= char_address + 1;
+		end if;
+	 end if;
+	end process;
+	
+	process (pix_clock_s) begin
+		if (rising_edge(pix_clock_s)) then
+			if (sec_cnt = 6250000) then
+				sec_cnt <= (others => '0');
+				offset <= offset + 1;
+				if (offset = 1337) then
+					offset <= (others => '0');
+				end if;
+			else
+				sec_cnt <= sec_cnt + 1;
+			end if;
+		end if;
+	end process;	
+	
+	char_value <= "00"&x"6" when char_address = 41 + offset  else -- F
+					 "00"&x"9" when char_address =  42 + offset  else -- I
+					 "00"&x"c" when char_address =  43 + offset  else -- L
+					 "00"&x"9" when char_address =  44 + offset  else -- I
+					 "01"&x"0" when char_address =  45 + offset  else -- P
+					 "10"&x"0";
+
+
 end rtl;
